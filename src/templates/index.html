@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Greeting Form</title>
+    <link rel="stylesheet" href="../static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <div class="card-image">    
+                <h2 class="card-heading">
+                    Client Form                     
+                </h2>
+            </div>
+            <form class="card-form">
+                <div class="input">
+                    <label class="input-label">First Name:</label>
+                    <input type="text" class="input-field" value="" id="firstName"/>                    
+                </div>
+                <div class="input">
+                    <label class="input-label">Last Name:</label>
+                    <input type="text" class="input-field" value="" id="lastName" required/>
+                </div>
+                <div class="action">
+                    <button class="action-button" onclick="greetMe(event)">Submit</button>
+                </div>
+            </form>
+            <div class="card-info">
+                <p>By signing up you are agreeing to our <a href="https://www.google.com">Terms and Conditions</a></p>
+            </div>
+            <div id="greetingCard" class="greeting-card hidden">
+                <p id="outputGreet"></p>
+            </div>
+        </div>
+    </div>
+    
+    <script src="../static/script.js"></script>
+</body>
+</html>

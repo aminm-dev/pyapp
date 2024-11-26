@@ -1,0 +1,30 @@
+---
+- hosts: ec2_instances
+  become: yes
+  vars:
+    ansible_python_interpreter: /usr/bin/python3.9
+  tasks:
+    - name: Install Python 3 and pip
+      yum:
+        name:
+          - python3
+          - python3-pip
+        state: present
+
+    - name: Install Ansible
+      pip:
+        name: ansible
+
+    - name: Install virtualenv
+      pip:
+        name: virtualenv
+
+    - name: Set up virtual environment
+      command: virtualenv /home/ec2-user/venv
+      args:
+        creates: /home/ec2-user/venv
+
+    - name: Install application dependencies
+      pip:
+        requirements: /home/ec2-user/{{ repo_name }}/src/requirements.txt
+        virtualenv: /home/ec2-user/venv

@@ -1,0 +1,101 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Checkout code
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    # Step 2: Set up Python (using stable Python version)
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.12'
+
+    # Step 3: Install dependencies (located in src/ directory)
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f src/requirements.txt ]; then pip install -r src/requirements.txt; fi
+
+    # Step 4: Check available disk space (for troubleshooting)
+    - name: Check Disk Space
+      run: df -h
+
+    # Step 5: Lint code for quality check using pylint and .pylintrc
+    - name: Install and run pylint (Use .pylintrc)
+      continue-on-error: true  # Ensure that the pipeline doesn't fail if Pylint finds issues
+      run: |
+        set -x  # Enable verbose logging for troubleshooting
+        mkdir -p reports  # Create a directory for reports
+        pip install pylint
+        if ls src/*.py 1> /dev/null 2>&1; then  # Check if Python files exist
+          pylint --rcfile=.pylintrc src/ --output-format=text | tee reports/pylint-report.txt  # Output to screen and save report
+        else
+          echo "No Python files found in src/"
+        fi
+
+    # Step 6: Run Bandit for security checks (generating report)
+    - name: Install and run Bandit (Python security linter)
+      run: |
+        pip install bandit
+        bandit -r src/ --severity-level high -f json | tee reports/bandit-report.json  # Output to screen and save report
+
+    # Step 7: Install and run dependency vulnerability scan using Snyk (requirements.txt in src/ directory)
+    - name: Install Snyk and run security checks (Generate report)
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_AUTH_TOKEN }}  # Use Snyk's authentication token
+      run: |
+        npm install -g snyk
+        snyk auth $SNYK_TOKEN
+        snyk test --file=src/requirements.txt --json | tee reports/snyk-report.json  # Remove --fail-on=high and log output
+        cat reports/snyk-report.json  # Output Snyk report to console
+
+    # Step 8: Run tests and generate coverage report (Ensure pytest runs)
+    - name: Install pytest and coverage tools
+      run: |
+        pip install pytest pytest-cov
+        pytest --cov=src/ --cov-report=xml --junitxml=reports/pytest-report.xml
+
+    # Step 9: Move coverage.xml to the reports folder
+    - name: Move Coverage Report
+      run: |
+        mkdir -p reports
+        mv coverage.xml reports/coverage.xml  # Move the coverage file to reports folder
+
+    # Step 10: Upload test coverage report to Codecov (with CODECOV_TOKEN)
+    - name: Upload Coverage to Codecov
+      uses: codecov/codecov-action@v2
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}  # Use the CODECOV_TOKEN you added to GitHub secrets
+
+    # Step 11: Commit and push build artifacts (coverage, pytest, and other reports) back to GitHub
+    - name: Push build artifacts to GitHub
+      run: |
+        git config --global user.name "github-actions"
+        git config --global user.email "github-actions@github.com"
+        git add reports/coverage.xml reports/pytest-report.xml reports/pylint-report.txt reports/bandit-report.json reports/snyk-report.json
+        git commit -m "Add test, linting, and security reports"
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_PAT }}  # Use your Personal Access Token (GH_PAT) to authenticate
+
+  cd:
+    needs: ci  # Ensure the CD phase only runs if CI completes successfully
+    if: success()  # CD phase runs only if the CI job succeeds
+    runs-on: ubuntu-latest
+    steps:
+    - name: Deploy Application
+      run: |
+        echo "Deploying application..."

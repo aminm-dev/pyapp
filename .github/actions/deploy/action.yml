@@ -1,0 +1,21 @@
+name: 'Prepare Deployment to EC2'
+description: 'Prepare files and copy to EC2 instance'
+inputs:
+  ec2_host:
+    description: 'EC2 instance host'
+    required: true
+  ssh_key:
+    description: 'SSH private key'
+    required: true
+  repo_name:
+    description: 'Repository name'
+    required: true
+  deploy_env:
+    description: 'Deployment Environment'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - run: ./prepare_deployment.sh ${{ inputs.ec2_host }} "${{ inputs.ssh_key }}" ${{ inputs.repo_name }} ${{ inputs.deploy_env }}
+      shell: bash
+      working-directory: ${{ github.action_path }}

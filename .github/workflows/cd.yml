@@ -1,0 +1,229 @@
+name: CD Pipeline
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+
+jobs:
+  deploy_staging:
+    runs-on: ubuntu-latest
+
+    env:
+      REPO_NAME: ${{ github.event.repository.name }}
+      GITHUB_WORKSPACE: ${{ github.workspace }}
+      DEPLOY_ENV_STAGING: "staging"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Install yq
+      run: |
+        sudo wget https://github.com/mikefarah/yq/releases/download/v4.6.3/yq_linux_amd64 -O /usr/bin/yq
+        sudo chmod +x /usr/bin/yq
+
+    - name: Load config
+      id: config
+      run: |
+        export STAGING_ENVIRONMENT=$(yq e '.aws.environment' config/staging_config.yml)
+        export AWS_REGION=$(yq e '.aws.region' config/staging_config.yml)
+        export AWS_AMI=$(yq e '.aws.ami' config/staging_config.yml)
+        export AWS_INSTANCE_TYPE=$(yq e '.aws.instance_type' config/staging_config.yml)
+        export AWS_EC2_KEY_NAME=$(yq e '.aws.key_name' config/staging_config.yml)
+        echo "STAGING_ENVIRONMENT=$STAGING_ENVIRONMENT" >> $GITHUB_ENV
+        echo "AWS_REGION=$AWS_REGION" >> $GITHUB_ENV
+        echo "AWS_AMI=$AWS_AMI" >> $GITHUB_ENV
+        echo "AWS_INSTANCE_TYPE=$AWS_INSTANCE_TYPE" >> $GITHUB_ENV
+        echo "AWS_EC2_KEY_NAME=$AWS_EC2_KEY_NAME" >> $GITHUB_ENV
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Initialize Terraform for Infrastructure (Staging)
+      working-directory: ./terraform/infrastructure
+      run: terraform init
+
+    - name: Apply Terraform for Infrastructure (Staging)
+      id: apply_infra_staging
+      working-directory: ./terraform/infrastructure
+      run: terraform apply -var environment=staging -var aws_region=${{ env.AWS_REGION }} -auto-approve
+
+    - name: Extract Infrastructure Outputs (Staging)
+      id: extract_infra_staging
+      working-directory: ./terraform/infrastructure
+      run: |
+        echo "STAGING_PUBLIC_SUBNET_ID=$(terraform output -raw public_subnet_id)" >> $GITHUB_ENV
+        echo "STAGING_PRIVATE_SUBNET_ID=$(terraform output -raw private_subnet_id)" >> $GITHUB_ENV
+        echo "STAGING_SG_ID=$(terraform output -raw security_group_id)" >> $GITHUB_ENV
+
+    - name: Create terraform.tfvars file for Staging
+      run: |
+        echo "environment=\"${{ env.DEPLOY_ENV_STAGING }}\"" > ./terraform/instances/staging/terraform.tfvars
+        echo "aws_region=\"${{ env.AWS_REGION }}\"" >> ./terraform/instances/staging/terraform.tfvars
+        echo "ami=\"${{ env.AWS_AMI }}\"" >> ./terraform/instances/staging/terraform.tfvars
+        echo "instance_type=\"${{ env.AWS_INSTANCE_TYPE }}\"" >> ./terraform/instances/staging/terraform.tfvars
+        echo "public_subnet_id=\"${{ env.STAGING_PUBLIC_SUBNET_ID }}\"" >> ./terraform/instances/staging/terraform.tfvars
+        echo "private_subnet_id=\"${{ env.STAGING_PRIVATE_SUBNET_ID }}\"" >> ./terraform/instances/staging/terraform.tfvars
+        echo "security_group_id=\"${{ env.STAGING_SG_ID }}\"" >> ./terraform/instances/staging/terraform.tfvars
+        echo "key_name=\"${{ env.AWS_EC2_KEY_NAME }}\"" >> ./terraform/instances/staging/terraform.tfvars
+
+    - name: Initialize Terraform for Instance (Staging)
+      working-directory: ./terraform/instances/staging
+      run: terraform init
+
+    - name: Apply Terraform for Instance (Staging)
+      id: apply_instance_staging
+      working-directory: ./terraform/instances/staging
+      run: terraform apply -auto-approve
+
+    - name: Extract Staging EC2 DNS and Instance ID
+      id: extract_staging_info
+      working-directory: ./terraform/instances/staging
+      run: |
+        echo "STAGING_DNS_NAME=$(terraform output -raw instance_dns)" >> $GITHUB_ENV
+        echo "STAGING_INSTANCE_ID=$(terraform output -raw instance_id)" >> $GITHUB_ENV
+
+    - name: Wait for Staging EC2 instance to be running
+      run: |
+        STATUS="pending"
+        while [ "$STATUS" != "running" ]; do
+          echo "Checking EC2 instance status..."
+          STATUS=$(aws ec2 describe-instances --instance-ids ${{ env.STAGING_INSTANCE_ID }} --query 'Reservations[0].Instances[0].State.Name' --output text)
+          echo "Current status: $STATUS"
+          if [ "$STATUS" != "running" ]; then
+            echo "Instance not ready, waiting..."
+            sleep 10
+          fi
+        done
+        echo "Staging EC2 instance is now running."
+        sleep 30  # Added extra sleep to ensure SSH readiness
+
+    - name: Prepare deployment to Staging EC2
+      uses: ./.github/actions/deploy
+      with:
+        ec2_host: ${{ env.STAGING_DNS_NAME }}
+        ssh_key: ${{ secrets.STAGING_EC2_SSH_KEY }}
+        repo_name: ${{ env.REPO_NAME }}
+        deploy_env: ${{ env.DEPLOY_ENV_STAGING }}
+
+    - name: Health check for Staging environment
+      run: |
+        sleep 10
+        curl --max-time 10 --retry 5 --retry-delay 10 --fail http://${{ env.STAGING_DNS_NAME }}:8080/health || exit 1
+
+  deploy_production:
+    needs: deploy_staging
+    runs-on: ubuntu-latest
+
+    env:
+      REPO_NAME: ${{ github.event.repository.name }}
+      GITHUB_WORKSPACE: ${{ github.workspace }}
+      DEPLOY_ENV_PRODUCTION: "production"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Install yq
+      run: |
+        sudo wget https://github.com/mikefarah/yq/releases/download/v4.6.3/yq_linux_amd64 -O /usr/bin/yq
+        sudo chmod +x /usr/bin/yq
+
+    - name: Load config
+      id: config
+      run: |
+        export PROD_ENVIRONMENT=$(yq e '.aws.environment' config/prod_config.yml)
+        export AWS_REGION=$(yq e '.aws.region' config/prod_config.yml)
+        export AWS_AMI=$(yq e '.aws.ami' config/prod_config.yml)
+        export AWS_INSTANCE_TYPE=$(yq e '.aws.instance_type' config/prod_config.yml)
+        export AWS_EC2_KEY_NAME=$(yq e '.aws.key_name' config/prod_config.yml)
+        echo "PRODUCTION ENVIRONMENT=$PROD_ENVIRONMENT" >> $GITHUB_ENV
+        echo "AWS_REGION=$AWS_REGION" >> $GITHUB_ENV
+        echo "AWS_AMI=$AWS_AMI" >> $GITHUB_ENV
+        echo "AWS_INSTANCE_TYPE=$AWS_INSTANCE_TYPE" >> $GITHUB_ENV
+        echo "AWS_EC2_KEY_NAME=$AWS_EC2_KEY_NAME" >> $GITHUB_ENV
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Initialize Terraform for Infrastructure (Production)
+      working-directory: ./terraform/infrastructure
+      run: terraform init
+
+    - name: Apply Terraform for Infrastructure (Production)
+      id: apply_infra_production
+      working-directory: ./terraform/infrastructure
+      run: terraform apply -var environment=production -var aws_region=${{ env.AWS_REGION }} -auto-approve
+
+    - name: Extract Infrastructure Outputs (Production)
+      id: extract_infra_production
+      working-directory: ./terraform/infrastructure
+      run: |
+        echo "PRODUCTION_PUBLIC_SUBNET_ID=$(terraform output -raw public_subnet_id)" >> $GITHUB_ENV
+        echo "PRODUCTION_PRIVATE_SUBNET_ID=$(terraform output -raw private_subnet_id)" >> $GITHUB_ENV
+        echo "PRODUCTION_SG_ID=$(terraform output -raw security_group_id)" >> $GITHUB_ENV
+
+    - name: Create terraform.tfvars file for Production
+      run: |
+        echo "environment=\"${{ env.DEPLOY_ENV_PRODUCTION }}\"" > ./terraform/instances/production/terraform.tfvars
+        echo "aws_region=\"${{ env.AWS_REGION }}\"" >> ./terraform/instances/production/terraform.tfvars
+        echo "ami=\"${{ env.AWS_AMI }}\"" >> ./terraform/instances/production/terraform.tfvars
+        echo "instance_type=\"${{ env.AWS_INSTANCE_TYPE }}\"" >> ./terraform/instances/production/terraform.tfvars
+        echo "public_subnet_id=\"${{ env.PRODUCTION_PUBLIC_SUBNET_ID }}\"" >> ./terraform/instances/production/terraform.tfvars
+        echo "private_subnet_id=\"${{ env.PRODUCTION_PRIVATE_SUBNET_ID }}\"" >> ./terraform/instances/production/terraform.tfvars
+        echo "security_group_id=\"${{ env.PRODUCTION_SG_ID }}\"" >> ./terraform/instances/production/terraform.tfvars
+        echo "key_name=\"${{ env.AWS_EC2_KEY_NAME }}\"" >> ./terraform/instances/production/terraform.tfvars
+
+    - name: Initialize Terraform for Instance (Production)
+      working-directory: ./terraform/instances/production
+      run: terraform init
+
+    - name: Apply Terraform for Instance (Production)
+      id: apply_instance_production
+      working-directory: ./terraform/instances/production
+      run: terraform apply -auto-approve
+
+    - name: Extract Production EC2 DNS and Instance ID
+      id: extract_production_info
+      working-directory: ./terraform/instances/production
+      run: |
+        echo "PRODUCTION_DNS_NAME=$(terraform output -raw instance_dns)" >> $GITHUB_ENV
+        echo "PRODUCTION_INSTANCE_ID=$(terraform output -raw instance_id)" >> $GITHUB_ENV
+
+    - name: Wait for Production EC2 instance to be running
+      run: |
+        STATUS="pending"
+        while [ "$STATUS" != "running" ]; do
+          echo "Checking EC2 instance status..."
+          STATUS=$(aws ec2 describe-instances --instance-ids ${{ env.PRODUCTION_INSTANCE_ID }} --query 'Reservations[0].Instances[0].State.Name' --output text)
+          echo "Current status: $STATUS"
+          if [ "$STATUS" != "running" ]; then
+            echo "Instance not ready, waiting..."
+            sleep 10
+          fi
+        done
+        echo "Production EC2 instance is now running."
+        sleep 30  # Added extra sleep to ensure SSH readiness
+
+    - name: Prepare deployment to Production EC2
+      uses: ./.github/actions/deploy
+      with:
+        ec2_host: ${{ env.PRODUCTION_DNS_NAME }}
+        ssh_key: ${{ secrets.PRODUCTION_EC2_SSH_KEY }}
+        repo_name: ${{ env.REPO_NAME }}
+        deploy_env: ${{ env.DEPLOY_ENV_PRODUCTION }}
+
+    - name: Health check for Production environment
+      run: |
+        sleep 10
+        curl --max-time 10 --retry 5 --retry-delay 10 --fail http://${{ env.PRODUCTION_DNS_NAME }}:80/health || exit 1

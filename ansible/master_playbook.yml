@@ -1,0 +1,3 @@
+---
+- import_playbook: setup_environment.yml
+- import_playbook: deploy_application.yml
