@@ -12,7 +12,9 @@ def test_index_route(client):
     """Test the root route of the application."""
     response = client.get('/')
     assert response.status_code == 200
-    assert b'<html>' in response.data  # Assuming `index.html` has HTML content
+    assert b'<!DOCTYPE html>' in response.data  # Check for valid HTML structure
+    assert b'<html' in response.data  # Check for the opening <html> tag
+
 
 def test_health_route(client):
     """Test the health check route."""
